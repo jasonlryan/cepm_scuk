@@ -1,0 +1,122 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Number Addition API",
+    "description": "A simple API to add two numbers",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://flask-addition-service-iuvapqijhq-ew.a.run.app"
+    }
+  ],
+  "security": [
+    {
+      "oauth2": []
+    }
+  ],
+  "components": {
+    "schemas": {
+      "AddRequest": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "type": "number",
+            "description": "First number to add"
+          },
+          "b": {
+            "type": "number",
+            "description": "Second number to add"
+          }
+        },
+        "required": ["a", "b"]
+      },
+      "AddResponse": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "number",
+            "description": "The sum of the two numbers"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error message"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "oauth2": {
+        "type": "oauth2",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://flask-addition-service-iuvapqijhq-ew.a.run.app/oauth/authorize",
+            "tokenUrl": "https://flask-addition-service-iuvapqijhq-ew.a.run.app/oauth/token",
+            "refreshUrl": "https://flask-addition-service-iuvapqijhq-ew.a.run.app/oauth/token",
+            "scopes": {}
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/add": {
+      "post": {
+        "summary": "Add two numbers",
+        "operationId": "addNumbers",
+        "security": [
+          {
+            "oauth2": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful addition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+} 
