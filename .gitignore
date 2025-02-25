@@ -26,4 +26,7 @@ yarn-error.log*
 *.swo
 
 # macOS system files
-.DS_Store 
+.DS_Store
+
+# Google Cloud credentials
+key.json 
