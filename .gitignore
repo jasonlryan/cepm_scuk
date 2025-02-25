@@ -23,4 +23,7 @@ yarn-error.log*
 .idea/
 .vscode/
 *.swp
-*.swo 
+*.swo
+
+# macOS system files
+.DS_Store 
