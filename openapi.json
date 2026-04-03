@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Number Addition API",
-    "description": "A simple API to add two numbers",
-    "version": "1.0.0"
+    "title": "CEPM - Creative Effectiveness Prediction Machine",
+    "description": "Analyse and predict the effectiveness of charity marketing assets against donor personas. Provides scoring, recommendations, and persona management for optimising fundraising and awareness campaigns.",
+    "version": "2.0.0"
   },
   "servers": [
     {
@@ -17,26 +17,110 @@
   ],
   "components": {
     "schemas": {
-      "AddRequest": {
+      "AnalyzeRequest": {
         "type": "object",
         "properties": {
-          "a": {
-            "type": "number",
-            "description": "First number to add"
+          "asset_type": {
+            "type": "string",
+            "enum": ["copy", "image", "campaign"],
+            "description": "Type of creative asset to analyse"
           },
-          "b": {
-            "type": "number",
-            "description": "Second number to add"
+          "target_persona": {
+            "type": "string",
+            "description": "Persona ID to score against (e.g. 'compassionate_supporter')"
+          },
+          "analysis_data": {
+            "type": "object",
+            "description": "Structured analysis of the asset performed by ChatGPT. For copy: include tone, readability, key_themes, cta_assessment, emotional_tone, sentiment. For image: include visual_elements, emotional_tone, audience_appeal, brand_consistency. For campaign: include copy_analysis and image_analysis sub-objects."
+          },
+          "user_context": {
+            "type": "object",
+            "properties": {
+              "campaign_goal": {
+                "type": "string",
+                "enum": ["fundraising", "awareness", "engagement"],
+                "description": "Goal of the campaign"
+              },
+              "channel": {
+                "type": "string",
+                "enum": ["email", "social_media", "web", "direct_mail", "mobile", "print"],
+                "description": "Distribution channel"
+              }
+            }
           }
         },
-        "required": ["a", "b"]
+        "required": ["asset_type", "target_persona", "analysis_data"]
       },
-      "AddResponse": {
+      "AnalyzeResponse": {
         "type": "object",
         "properties": {
-          "result": {
-            "type": "number",
-            "description": "The sum of the two numbers"
+          "analysis_id": {
+            "type": "string",
+            "description": "Unique ID for this analysis"
+          },
+          "scores": {
+            "type": "object",
+            "description": "Effectiveness scores (0-1) including overall, emotional_impact, clarity, persona_alignment, cta_effectiveness"
+          },
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "aspect": { "type": "string" },
+                "suggestion": { "type": "string" },
+                "importance": { "type": "string", "enum": ["high", "medium", "low"] },
+                "current_score": { "type": "number" }
+              }
+            },
+            "description": "Actionable recommendations for improvement"
+          },
+          "persona_insights": {
+            "type": "object",
+            "properties": {
+              "strengths": { "type": "array", "items": { "type": "string" } },
+              "weaknesses": { "type": "array", "items": { "type": "string" } },
+              "top_priority": { "type": "string" }
+            }
+          },
+          "target_persona": { "type": "string" },
+          "asset_type": { "type": "string" }
+        }
+      },
+      "Persona": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "emotional_triggers": { "type": "array", "items": { "type": "string" } },
+          "communication_preferences": {
+            "type": "object",
+            "properties": {
+              "tone": { "type": "string" },
+              "formality": { "type": "number" },
+              "message_length": { "type": "string" },
+              "preferred_language": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "visual_preferences": {
+            "type": "object",
+            "properties": {
+              "colors": { "type": "array", "items": { "type": "string" } },
+              "imagery": { "type": "array", "items": { "type": "string" } },
+              "style": { "type": "string" }
+            }
+          },
+          "donation_motivations": { "type": "array", "items": { "type": "string" } },
+          "preferred_channels": { "type": "array", "items": { "type": "string" } },
+          "response_patterns": {
+            "type": "object",
+            "properties": {
+              "urgency_sensitivity": { "type": "number" },
+              "data_driven": { "type": "number" },
+              "story_driven": { "type": "number" },
+              "social_proof": { "type": "number" }
+            }
           }
         }
       },
@@ -47,6 +131,20 @@
             "type": "string",
             "description": "Error message"
           }
+        }
+      },
+      "AddRequest": {
+        "type": "object",
+        "properties": {
+          "a": { "type": "number", "description": "First number to add" },
+          "b": { "type": "number", "description": "Second number to add" }
+        },
+        "required": ["a", "b"]
+      },
+      "AddResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "type": "number", "description": "The sum of the two numbers" }
         }
       }
     },
@@ -65,22 +163,335 @@
     }
   },
   "paths": {
-    "/add": {
+    "/analyze/creative": {
       "post": {
-        "summary": "Add two numbers",
-        "operationId": "addNumbers",
-        "security": [
+        "summary": "Analyse a creative asset against a donor persona",
+        "description": "Submit a structured analysis of a marketing asset (copy, image, or campaign) and receive effectiveness scores, recommendations, and persona insights. ChatGPT should first analyse the asset using its multimodal capabilities, structure the results as JSON, then send them to this endpoint.",
+        "operationId": "analyzeCreative",
+        "security": [{ "oauth2": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AnalyzeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Analysis completed successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AnalyzeResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Persona not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/personas": {
+      "get": {
+        "summary": "List all donor personas",
+        "description": "Retrieve all available donor persona definitions.",
+        "operationId": "listPersonas",
+        "security": [{ "oauth2": [] }],
+        "responses": {
+          "200": {
+            "description": "List of personas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "personas": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Persona" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a new donor persona",
+        "description": "Create a custom donor persona with specific emotional triggers, communication preferences, and visual preferences.",
+        "operationId": "createPersona",
+        "security": [{ "oauth2": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Persona" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Persona created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Persona" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/personas/{persona_id}": {
+      "get": {
+        "summary": "Get a specific donor persona",
+        "operationId": "getPersona",
+        "security": [{ "oauth2": [] }],
+        "parameters": [
           {
-            "oauth2": []
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Persona identifier (e.g. 'compassionate_supporter')"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persona details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Persona" }
+              }
+            }
+          },
+          "404": {
+            "description": "Persona not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Update a donor persona",
+        "operationId": "updatePersona",
+        "security": [{ "oauth2": [] }],
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddRequest"
+              "schema": { "$ref": "#/components/schemas/Persona" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Persona updated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Persona" }
               }
+            }
+          },
+          "404": {
+            "description": "Persona not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a donor persona",
+        "operationId": "deletePersona",
+        "security": [{ "oauth2": [] }],
+        "parameters": [
+          {
+            "name": "persona_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persona deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Persona not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/personas/seed": {
+      "post": {
+        "summary": "Seed default donor personas",
+        "description": "Create the 5 default charity donor personas (compassionate_supporter, impact_investor, community_builder, legacy_giver, digital_activist) if they don't already exist.",
+        "operationId": "seedPersonas",
+        "security": [{ "oauth2": [] }],
+        "responses": {
+          "200": {
+            "description": "Personas seeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seeded": { "type": "array", "items": { "type": "string" } },
+                    "count": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/analysis/history": {
+      "get": {
+        "summary": "Get analysis history",
+        "description": "Retrieve past analysis results with optional filtering by persona or asset type.",
+        "operationId": "getAnalysisHistory",
+        "security": [{ "oauth2": [] }],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 20 },
+            "description": "Max results to return (max 100)"
+          },
+          {
+            "name": "persona",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Filter by persona ID"
+          },
+          {
+            "name": "asset_type",
+            "in": "query",
+            "schema": { "type": "string", "enum": ["copy", "image", "campaign"] },
+            "description": "Filter by asset type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Analysis history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "analyses": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyzeResponse" } },
+                    "count": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/analysis/{analysis_id}": {
+      "get": {
+        "summary": "Get a specific analysis result",
+        "operationId": "getAnalysis",
+        "security": [{ "oauth2": [] }],
+        "parameters": [
+          {
+            "name": "analysis_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Analysis UUID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Analysis result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AnalyzeResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Analysis not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/add": {
+      "post": {
+        "summary": "Add two numbers",
+        "operationId": "addNumbers",
+        "security": [{ "oauth2": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AddRequest" }
             }
           }
         },
@@ -89,9 +500,7 @@
             "description": "Successful addition",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddResponse"
-                }
+                "schema": { "$ref": "#/components/schemas/AddResponse" }
               }
             }
           },
@@ -99,19 +508,7 @@
             "description": "Invalid input",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
               }
             }
           }
@@ -119,4 +516,4 @@
       }
     }
   }
-} 
+}
