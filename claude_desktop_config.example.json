@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cepm": {
+      "command": "python",
+      "args": ["/path/to/cepm_scuk/mcp_server.py"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/key.json"
+      }
+    }
+  }
+}

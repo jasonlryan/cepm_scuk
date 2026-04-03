@@ -2,6 +2,12 @@
 node_modules/
 jspm_packages/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
 # Build outputs
 dist/
 build/
