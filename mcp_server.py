@@ -5,13 +5,19 @@ Exposes the Creative Effectiveness Prediction Machine as MCP tools,
 resources, and prompts for use with Claude Desktop, Claude Code,
 and any MCP-compatible client.
 
-Run locally:   python mcp_server.py
-Run via stdio: Set as an MCP server in Claude Desktop config
+Transports:
+  stdio (default):  python mcp_server.py
+  SSE (remote):     python mcp_server.py --transport sse --port 8443
+  HTTP (remote):    python mcp_server.py --transport http --port 8443
 """
 
 import json
 import uuid
 import logging
+import sys
+import os
+import argparse
+from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -19,18 +25,61 @@ from mcp.server.fastmcp import FastMCP
 from cepm import personas as persona_service
 from cepm import scoring, recommendations, storage as cepm_storage
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ============================================================
+# Logging — stderr only (stdout reserved for JSON-RPC in stdio mode)
+# ============================================================
 
-# Create the MCP server
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    stream=sys.stderr,
+)
+logger = logging.getLogger("cepm-mcp")
+
+
+# ============================================================
+# Lifespan — initialise Firestore + seed personas on startup
+# ============================================================
+
+@asynccontextmanager
+async def cepm_lifespan(server):
+    """Initialise shared resources when the MCP server starts."""
+    logger.info("CEPM MCP server starting up")
+
+    # Ensure Firestore client is ready
+    db = cepm_storage.get_db()
+    if db:
+        logger.info("Firestore connected")
+        # Auto-seed default personas on first run
+        seeded = persona_service.seed_default_personas()
+        if seeded:
+            logger.info(f"Seeded default personas: {seeded}")
+    else:
+        logger.warning("Firestore unavailable — using in-memory persona defaults")
+
+    yield {}
+
+    logger.info("CEPM MCP server shutting down")
+
+
+# ============================================================
+# Server
+# ============================================================
+
 mcp = FastMCP(
     "cepm",
-    description="Creative Effectiveness Prediction Machine — analyse charity marketing assets against donor personas"
+    description=(
+        "Creative Effectiveness Prediction Machine (CEPM) for SCUK. "
+        "Analyse charity marketing assets (copy, images, campaigns) against "
+        "donor personas. Scores effectiveness, generates recommendations, "
+        "and tracks analysis history."
+    ),
+    lifespan=cepm_lifespan,
 )
 
 
 # ============================================================
-# Tools
+# Tools — Analysis
 # ============================================================
 
 @mcp.tool()
@@ -39,29 +88,32 @@ def analyze_creative(
     target_persona: str,
     analysis_data: dict,
     campaign_goal: str = "",
-    channel: str = ""
+    channel: str = "",
 ) -> dict:
     """
-    Analyse a creative asset against a donor persona and get effectiveness scores.
+    Score a creative asset against a donor persona.
 
-    You (Claude) should first analyse the user's marketing asset (image or copy),
-    then structure your analysis as a JSON dict and pass it here for scoring.
+    You (Claude) should first analyse the user's marketing asset, then
+    structure your analysis as JSON and pass it here for scoring.
 
     Args:
-        asset_type: Type of asset — "copy", "image", or "campaign"
-        target_persona: Persona ID to score against (e.g. "compassionate_supporter")
-        analysis_data: Your structured analysis of the asset. For copy, include keys like:
-            tone (primary, secondary, formality), readability (score, grade_level, complexity),
-            key_themes, cta_assessment (clarity, urgency, persuasiveness),
-            emotional_tone (primary, secondary, intensity), sentiment (positive, negative, neutral).
-            For image, include: visual_elements (dominant_colors, composition, subject_type),
-            emotional_tone, audience_appeal, brand_consistency.
-            For campaign, include both copy_analysis and image_analysis sub-dicts.
+        asset_type: "copy", "image", or "campaign"
+        target_persona: Persona ID (e.g. "compassionate_supporter")
+        analysis_data: Your structured analysis. For copy include:
+            tone {primary, secondary, formality 0-1},
+            readability {score 0-100, grade_level, complexity},
+            key_themes [], cta_assessment {clarity, urgency, persuasiveness 0-1},
+            emotional_tone {primary, secondary, intensity 0-1},
+            sentiment {positive, negative, neutral 0-1}.
+            For image include: visual_elements {dominant_colors, composition,
+            subject_type, background_type}, emotional_tone, audience_appeal,
+            brand_consistency 0-1.
+            For campaign include copy_analysis and image_analysis sub-dicts.
         campaign_goal: Optional — "fundraising", "awareness", or "engagement"
         channel: Optional — "email", "social_media", "web", "direct_mail", "mobile"
 
     Returns:
-        Scores, recommendations, and persona insights
+        Effectiveness scores (0-1), actionable recommendations, persona insights
     """
     if asset_type not in ('copy', 'image', 'campaign'):
         return {"error": "asset_type must be 'copy', 'image', or 'campaign'"}
@@ -94,6 +146,11 @@ def analyze_creative(
         'persona_insights': insights,
     })
 
+    logger.info(
+        f"Analysis {analysis_id}: type={asset_type} persona={target_persona} "
+        f"overall={scores.get('overall')}"
+    )
+
     return {
         "analysis_id": analysis_id,
         "target_persona": persona.get('name', target_persona),
@@ -105,12 +162,77 @@ def analyze_creative(
 
 
 @mcp.tool()
+def compare_across_personas(
+    asset_type: str,
+    analysis_data: dict,
+    campaign_goal: str = "",
+    channel: str = "",
+) -> dict:
+    """
+    Score a creative asset against ALL personas to find the best audience match.
+
+    Runs the scoring engine for every persona and returns a comparison table.
+
+    Args:
+        asset_type: "copy", "image", or "campaign"
+        analysis_data: Your structured analysis (same format as analyze_creative)
+        campaign_goal: Optional campaign goal
+        channel: Optional distribution channel
+
+    Returns:
+        Comparison table with scores per persona, ranked by overall score
+    """
+    all_personas = persona_service.list_personas()
+    user_context = {}
+    if campaign_goal:
+        user_context['campaign_goal'] = campaign_goal
+    if channel:
+        user_context['channel'] = channel
+
+    results = []
+    for persona in all_personas:
+        scores = scoring.score_creative(analysis_data, persona, asset_type, user_context)
+        results.append({
+            "persona_id": persona['id'],
+            "persona_name": persona.get('name', persona['id']),
+            "overall": scores.get('overall', 0),
+            "emotional_impact": scores.get('emotional_impact', 0),
+            "persona_alignment": scores.get('persona_alignment', 0),
+            "scores": scores,
+        })
+
+    results.sort(key=lambda r: r['overall'], reverse=True)
+
+    best = results[0] if results else None
+    worst = results[-1] if results else None
+
+    return {
+        "comparison": results,
+        "best_match": {
+            "persona": best['persona_name'],
+            "overall_score": best['overall'],
+        } if best else None,
+        "worst_match": {
+            "persona": worst['persona_name'],
+            "overall_score": worst['overall'],
+        } if worst else None,
+        "asset_type": asset_type,
+    }
+
+
+# ============================================================
+# Tools — Persona Management
+# ============================================================
+
+@mcp.tool()
 def list_personas() -> list[dict]:
     """
     List all available donor personas.
 
     Returns all persona definitions with their IDs, names,
-    emotional triggers, and preferences.
+    emotional triggers, and preferences. Default personas include:
+    compassionate_supporter, impact_investor, community_builder,
+    legacy_giver, digital_activist.
     """
     return persona_service.list_personas()
 
@@ -118,16 +240,15 @@ def list_personas() -> list[dict]:
 @mcp.tool()
 def get_persona(persona_id: str) -> dict:
     """
-    Get the full definition of a specific donor persona.
+    Get the full definition of a donor persona.
 
     Args:
-        persona_id: The persona identifier (e.g. "compassionate_supporter",
-                    "impact_investor", "community_builder", "legacy_giver",
-                    "digital_activist")
+        persona_id: e.g. "compassionate_supporter", "impact_investor",
+                    "community_builder", "legacy_giver", "digital_activist"
 
     Returns:
-        Full persona definition including emotional triggers,
-        communication preferences, visual preferences, and response patterns
+        Full persona: emotional triggers, communication preferences,
+        visual preferences, donation motivations, response patterns
     """
     result = persona_service.get_persona(persona_id)
     if not result:
@@ -146,24 +267,21 @@ def create_persona(
     visual_preferences: dict,
     donation_motivations: list[str] = None,
     preferred_channels: list[str] = None,
-    response_patterns: dict = None
+    response_patterns: dict = None,
 ) -> dict:
     """
     Create a new donor persona.
 
     Args:
-        persona_id: Unique identifier (snake_case, e.g. "monthly_giver")
+        persona_id: Unique snake_case identifier (e.g. "monthly_giver")
         name: Display name (e.g. "Monthly Giver")
         description: Brief description of this donor type
-        emotional_triggers: List of emotional triggers (e.g. ["consistency", "trust", "belonging"])
-        communication_preferences: Dict with tone, formality (0-1), message_length, preferred_language
-        visual_preferences: Dict with colors, imagery, style
-        donation_motivations: Optional list of what motivates donations
-        preferred_channels: Optional list of preferred communication channels
-        response_patterns: Optional dict with urgency_sensitivity, data_driven, story_driven, social_proof (all 0-1)
-
-    Returns:
-        The created persona or error
+        emotional_triggers: e.g. ["consistency", "trust", "belonging"]
+        communication_preferences: {tone, formality 0-1, message_length, preferred_language []}
+        visual_preferences: {colors [], imagery [], style}
+        donation_motivations: Optional list
+        preferred_channels: Optional list (email, social_media, web, direct_mail, mobile)
+        response_patterns: Optional {urgency_sensitivity, data_driven, story_driven, social_proof} all 0-1
     """
     data = {
         'name': name,
@@ -182,6 +300,7 @@ def create_persona(
     result, error = persona_service.create_persona(persona_id, data)
     if error:
         return {"error": error}
+    logger.info(f"Created persona: {persona_id}")
     return result
 
 
@@ -192,55 +311,47 @@ def update_persona(persona_id: str, updates: dict) -> dict:
 
     Args:
         persona_id: The persona to update
-        updates: Dict of fields to update (e.g. {"emotional_triggers": ["new", "triggers"]})
-
-    Returns:
-        The updated persona or error
+        updates: Fields to update, e.g. {"emotional_triggers": ["new", "triggers"]}
     """
     result, error = persona_service.update_persona(persona_id, updates)
     if error:
         return {"error": error}
+    logger.info(f"Updated persona: {persona_id}")
     return result
 
 
 @mcp.tool()
 def delete_persona(persona_id: str) -> dict:
-    """
-    Delete a donor persona.
-
-    Args:
-        persona_id: The persona to delete
-
-    Returns:
-        Confirmation or error
-    """
+    """Delete a donor persona."""
     success, error = persona_service.delete_persona(persona_id)
     if error:
         return {"error": error}
+    logger.info(f"Deleted persona: {persona_id}")
     return {"status": "deleted", "persona_id": persona_id}
 
+
+# ============================================================
+# Tools — History
+# ============================================================
 
 @mcp.tool()
 def get_analysis_history(
     limit: int = 20,
     persona_filter: str = "",
-    asset_type_filter: str = ""
+    asset_type_filter: str = "",
 ) -> dict:
     """
     Retrieve past analysis results.
 
     Args:
-        limit: Maximum number of results (default 20, max 100)
+        limit: Max results (default 20, max 100)
         persona_filter: Optional — filter by persona ID
-        asset_type_filter: Optional — filter by asset type (copy/image/campaign)
-
-    Returns:
-        List of past analyses with scores and recommendations
+        asset_type_filter: Optional — "copy", "image", or "campaign"
     """
     results = cepm_storage.list_analyses(
         limit=min(limit, 100),
         persona_filter=persona_filter or None,
-        asset_type_filter=asset_type_filter or None
+        asset_type_filter=asset_type_filter or None,
     )
     return {"analyses": results, "count": len(results)}
 
@@ -252,9 +363,6 @@ def get_analysis(analysis_id: str) -> dict:
 
     Args:
         analysis_id: The analysis UUID
-
-    Returns:
-        Full analysis result with scores, recommendations, and insights
     """
     result = cepm_storage.get_analysis(analysis_id)
     if not result:
@@ -265,16 +373,13 @@ def get_analysis(analysis_id: str) -> dict:
 @mcp.tool()
 def seed_default_personas() -> dict:
     """
-    Seed the default set of charity donor personas.
+    Seed the 5 default charity donor personas if they don't already exist.
 
-    Creates 5 default personas if they don't already exist:
-    compassionate_supporter, impact_investor, community_builder,
+    Creates: compassionate_supporter, impact_investor, community_builder,
     legacy_giver, digital_activist.
-
-    Returns:
-        List of newly seeded persona IDs
     """
     seeded = persona_service.seed_default_personas()
+    logger.info(f"Seeded personas: {seeded}")
     return {"seeded": seeded, "count": len(seeded)}
 
 
@@ -282,40 +387,95 @@ def seed_default_personas() -> dict:
 # Resources
 # ============================================================
 
-@mcp.resource("persona://list")
+@mcp.resource("cepm://personas")
 def resource_persona_list() -> str:
-    """List of all available donor personas."""
+    """Overview of all available donor personas."""
     personas = persona_service.list_personas()
-    summary = []
+    lines = ["# CEPM Donor Personas\n"]
     for p in personas:
-        summary.append(f"- **{p.get('name', p['id'])}** (`{p['id']}`): {p.get('description', 'No description')}")
-    return "# Available Donor Personas\n\n" + "\n".join(summary)
+        triggers = ", ".join(p.get('emotional_triggers', [])[:4])
+        lines.append(
+            f"## {p.get('name', p['id'])} (`{p['id']}`)\n"
+            f"{p.get('description', 'No description')}\n"
+            f"- Triggers: {triggers}\n"
+            f"- Tone: {p.get('communication_preferences', {}).get('tone', '?')}\n"
+            f"- Channels: {', '.join(p.get('preferred_channels', []))}\n"
+        )
+    return "\n".join(lines)
 
 
-@mcp.resource("persona://{persona_id}")
+@mcp.resource("cepm://persona/{persona_id}")
 def resource_persona(persona_id: str) -> str:
-    """Full definition of a specific donor persona."""
+    """Full JSON definition of a specific donor persona."""
     persona = persona_service.get_persona(persona_id)
     if not persona:
         return f"Persona '{persona_id}' not found."
     return json.dumps(persona, indent=2, default=str)
 
 
-@mcp.resource("analysis://recent")
+@mcp.resource("cepm://history")
 def resource_recent_analyses() -> str:
-    """Recent analysis results."""
+    """Summary of the 10 most recent analyses."""
     results = cepm_storage.list_analyses(limit=10)
     if not results:
-        return "No analyses found. Use the analyze_creative tool to analyse a marketing asset."
-    lines = ["# Recent Analyses\n"]
+        return "No analyses yet. Use the analyze_creative tool to get started."
+    lines = ["# Recent CEPM Analyses\n"]
     for r in results:
         overall = r.get('scores', {}).get('overall', 'N/A')
+        strengths = ", ".join(r.get('persona_insights', {}).get('strengths', [])[:2])
         lines.append(
-            f"- `{r['id']}` | {r.get('asset_type', '?')} | "
+            f"- **{r['id'][:8]}...** | {r.get('asset_type', '?')} | "
             f"persona: {r.get('target_persona', '?')} | "
-            f"overall: {overall} | {r.get('created_at', '')}"
+            f"overall: {overall} | strengths: {strengths}"
         )
     return "\n".join(lines)
+
+
+@mcp.resource("cepm://guide")
+def resource_user_guide() -> str:
+    """Quick-start guide for using CEPM with Claude."""
+    return """# CEPM Quick-Start Guide
+
+## What is CEPM?
+The Creative Effectiveness Prediction Machine scores your charity marketing
+assets against donor personas. It tells you how well your copy, images, or
+campaigns resonate with specific donor types.
+
+## How to use it
+
+### 1. Analyse marketing copy
+Share your email, ad, or social post text. Claude will:
+- Assess tone, readability, emotional impact, and CTA strength
+- Score it against your chosen donor persona
+- Give you specific recommendations
+
+### 2. Analyse an image
+Share or describe your marketing image. Claude will:
+- Assess visual elements, emotional tone, and audience appeal
+- Score it against your chosen persona's visual preferences
+- Suggest improvements
+
+### 3. Full campaign analysis
+Share both copy and image for a holistic score including
+copy-image coherence.
+
+### 4. Compare across personas
+Not sure who your audience is? Run your asset against all 5
+personas to find the best match.
+
+## Available personas
+- `compassionate_supporter` — empathy-driven, responds to stories
+- `impact_investor` — data-driven, wants measurable outcomes
+- `community_builder` — motivated by belonging and collective action
+- `legacy_giver` — values tradition and lasting impact
+- `digital_activist` — young, bold, authenticity-driven
+
+## Tips
+- Be specific about your campaign goal (fundraising/awareness/engagement)
+- Mention the distribution channel (email/social/web/direct_mail)
+- Use `compare_across_personas` when targeting is unclear
+- Check `get_analysis_history` to track improvements over time
+"""
 
 
 # ============================================================
@@ -323,90 +483,104 @@ def resource_recent_analyses() -> str:
 # ============================================================
 
 @mcp.prompt()
-def analyze_fundraising_email(copy_text: str, target_persona: str = "compassionate_supporter") -> str:
+def analyze_fundraising_email(
+    copy_text: str,
+    target_persona: str = "compassionate_supporter",
+) -> str:
     """Analyse a fundraising email for effectiveness against a donor persona."""
-    return f"""Please analyse this fundraising email copy for effectiveness against the "{target_persona}" donor persona.
+    return f"""Analyse this fundraising email for effectiveness against the "{target_persona}" persona.
 
-**Email copy to analyse:**
+**Email copy:**
 {copy_text}
 
-**Instructions:**
-1. First, read the persona definition using the `get_persona` tool with persona_id="{target_persona}"
-2. Analyse the copy and structure your findings as JSON with these keys:
-   - tone: {{primary, secondary, formality (0-1)}}
-   - readability: {{score (0-100), grade_level, complexity (simple/moderate/complex)}}
-   - key_themes: [list of themes]
-   - cta_assessment: {{clarity (0-1), urgency (0-1), persuasiveness (0-1)}}
-   - emotional_tone: {{primary, secondary, intensity (0-1)}}
-   - sentiment: {{positive (0-1), negative (0-1), neutral (0-1)}}
-3. Pass your analysis to the `analyze_creative` tool with asset_type="copy", target_persona="{target_persona}", and campaign_goal="fundraising"
-4. Present the scores and recommendations in a clear, actionable format
+**Steps:**
+1. Use `get_persona` to load the "{target_persona}" persona definition
+2. Analyse the copy — assess tone, readability, emotional resonance, themes, CTA
+3. Structure your analysis as JSON and call `analyze_creative` with asset_type="copy",
+   target_persona="{target_persona}", campaign_goal="fundraising"
+4. Present the scores as a clear summary table
+5. List the recommendations in priority order with specific rewording suggestions
 """
 
 
 @mcp.prompt()
-def analyze_social_media_image(image_description: str, target_persona: str = "digital_activist") -> str:
-    """Analyse a social media marketing image for effectiveness."""
-    return f"""Please analyse this social media marketing image for effectiveness against the "{target_persona}" donor persona.
+def analyze_social_image(
+    image_description: str,
+    target_persona: str = "digital_activist",
+) -> str:
+    """Analyse a social media marketing image."""
+    return f"""Analyse this social media image for effectiveness against the "{target_persona}" persona.
 
-**Image to analyse:**
+**Image:**
 {image_description}
 
-**Instructions:**
-1. First, read the persona definition using the `get_persona` tool with persona_id="{target_persona}"
-2. Analyse the image and structure your findings as JSON with these keys:
-   - visual_elements: {{dominant_colors: [], composition, subject_type, background_type}}
-   - emotional_tone: {{primary, secondary, intensity (0-1)}}
-   - audience_appeal: {{age_groups: [], gender_bias}}
-   - brand_consistency: (0-1)
-3. Pass your analysis to the `analyze_creative` tool with asset_type="image", target_persona="{target_persona}", and channel="social_media"
-4. Present the scores and recommendations in a clear, actionable format
+**Steps:**
+1. Use `get_persona` to load the "{target_persona}" persona definition
+2. Analyse visual elements, emotional tone, composition, colours, subject
+3. Structure as JSON and call `analyze_creative` with asset_type="image",
+   target_persona="{target_persona}", channel="social_media"
+4. Present scores and visual improvement recommendations
 """
 
 
 @mcp.prompt()
-def analyze_campaign(
+def analyze_full_campaign(
     copy_text: str,
     image_description: str,
     target_persona: str = "compassionate_supporter",
-    campaign_goal: str = "fundraising"
+    campaign_goal: str = "fundraising",
 ) -> str:
-    """Analyse a full campaign (copy + image) for effectiveness."""
-    return f"""Please analyse this full marketing campaign for effectiveness against the "{target_persona}" donor persona.
+    """Analyse a full campaign (copy + image) for coherence and effectiveness."""
+    return f"""Analyse this complete campaign for effectiveness against the "{target_persona}" persona.
 
-**Campaign copy:**
-{copy_text}
+**Copy:** {copy_text}
+**Image:** {image_description}
+**Goal:** {campaign_goal}
 
-**Campaign image:**
-{image_description}
-
-**Campaign goal:** {campaign_goal}
-
-**Instructions:**
-1. First, read the persona definition using the `get_persona` tool with persona_id="{target_persona}"
-2. Analyse both the copy and image, then structure your findings as JSON with:
-   - copy_analysis: {{tone, readability, key_themes, cta_assessment, emotional_tone, sentiment}}
-   - image_analysis: {{visual_elements, emotional_tone, audience_appeal, brand_consistency}}
-3. Pass your analysis to the `analyze_creative` tool with asset_type="campaign", target_persona="{target_persona}", and campaign_goal="{campaign_goal}"
-4. Present the scores and recommendations, paying special attention to how well the copy and image work together
+**Steps:**
+1. Load the persona with `get_persona`
+2. Analyse copy and image separately, then structure as:
+   {{"copy_analysis": {{...}}, "image_analysis": {{...}}}}
+3. Call `analyze_creative` with asset_type="campaign",
+   target_persona="{target_persona}", campaign_goal="{campaign_goal}"
+4. Focus your summary on copy-image coherence and overall persona fit
 """
 
 
 @mcp.prompt()
-def compare_personas(copy_text: str) -> str:
-    """Analyse copy against all personas to find the best audience match."""
-    return f"""Please analyse this marketing copy against ALL available donor personas to determine which audience it's most effective for.
+def find_best_audience(copy_text: str) -> str:
+    """Find which donor persona this copy resonates with most."""
+    return f"""Determine which donor persona this marketing copy is most effective for.
 
-**Copy to analyse:**
-{copy_text}
+**Copy:** {copy_text}
 
-**Instructions:**
-1. First, use `list_personas` to get all available personas
-2. Analyse the copy once and structure your findings (tone, readability, key_themes, cta_assessment, emotional_tone, sentiment)
-3. Run `analyze_creative` for EACH persona with asset_type="copy"
-4. Create a comparison table showing scores across all personas
-5. Identify which persona this copy is best suited for and why
-6. Recommend adjustments if the copy should target a different persona
+**Steps:**
+1. Analyse the copy (tone, readability, themes, CTA, emotional tone, sentiment)
+2. Call `compare_across_personas` with asset_type="copy" and your analysis
+3. Present a comparison table: persona | overall | emotional_impact | alignment
+4. Explain WHY the top persona is the best match
+5. If the copy should target a different persona, suggest specific rewrites
+"""
+
+
+@mcp.prompt()
+def improve_for_persona(
+    copy_text: str,
+    target_persona: str,
+) -> str:
+    """Get specific rewrite suggestions to improve copy for a persona."""
+    return f"""Analyse this copy and provide specific rewrite suggestions to improve it for the "{target_persona}" persona.
+
+**Copy:** {copy_text}
+
+**Steps:**
+1. Load the persona with `get_persona`
+2. Analyse and score with `analyze_creative`
+3. For EACH recommendation, provide:
+   - The original line/phrase
+   - A rewritten version optimised for this persona
+   - Why the change works better for this persona type
+4. Show projected score improvement if the changes were applied
 """
 
 
@@ -414,5 +588,27 @@ def compare_personas(copy_text: str) -> str:
 # Entry point
 # ============================================================
 
+def main():
+    parser = argparse.ArgumentParser(description="CEPM MCP Server")
+    parser.add_argument(
+        "--transport", choices=["stdio", "sse", "http"],
+        default="stdio",
+        help="Transport protocol (default: stdio)"
+    )
+    parser.add_argument("--port", type=int, default=8443, help="Port for SSE/HTTP transport")
+    parser.add_argument("--host", default="0.0.0.0", help="Host for SSE/HTTP transport")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        logger.info("Starting CEPM MCP server (stdio transport)")
+        mcp.run(transport="stdio")
+    elif args.transport == "sse":
+        logger.info(f"Starting CEPM MCP server (SSE on {args.host}:{args.port})")
+        mcp.run(transport="sse", host=args.host, port=args.port)
+    elif args.transport == "http":
+        logger.info(f"Starting CEPM MCP server (HTTP on {args.host}:{args.port})")
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
